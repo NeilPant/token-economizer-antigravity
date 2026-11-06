@@ -15,9 +15,11 @@ has not started.
 - [Antigravity plugin docs](https://antigravity.google/docs/plugins/)
 - [Antigravity hooks docs](https://antigravity.google/docs/hooks/)
 
-The first implementation milestone is a capability spike against current
-Antigravity CLI and IDE builds. It should verify the hook payloads and the limits
-called out in `PLAN.md` before adapting the shared TokenEconomizer engine.
+The plugin and hook contracts are documented in `PLAN.md`, but the Agy runtime
+has not been exercised here because the `agy` executable is unavailable in this
+workspace. The first implementation milestone is a capability spike against
+live Antigravity App, CLI, and IDE builds before adapting the shared
+TokenEconomizer engine.
 
 ## Upstream attribution
 

@@ -19,48 +19,107 @@ agent-specific hook adapters.
 
 ## How the native plugin model fits
 
-Antigravity plugins are versioned directories with `plugin.json` plus optional
-skills, MCP servers, custom agents, rules, and lifecycle hooks. They can be
-installed from a local directory or GitHub repository. Hook scripts receive a
-JSON event on stdin and return JSON on stdout; a native plugin can bundle
-`hooks.json` and relative-path scripts.
+Antigravity plugins are versioned directories with a required `plugin.json` and
+optional skills, MCP servers, custom agents, rules, and lifecycle hooks. The
+same plugin format is supported by the App, CLI, and IDE. Plugins can be
+installed from a local path or GitHub URL, and App installations sync into the
+CLI's installed list. The plan is to use a native manifest, skills, and
+`hooks.json`, not to wrap the existing plugin in a separate service.
 
-The target lifecycle includes `SessionStart`, `PreInvocation`, `PostInvocation`,
-`PreToolUse`, `PostToolUse`, and `Stop`. Antigravity's hook contract is not
-identical to the current upstream adapters, so add an Antigravity host adapter
-instead of translating Antigravity events into a different host's assumptions.
+### Runtime behavior confirmed in the official docs
+
+These are documented contracts, not live observations from this workspace.
+The `agy` executable is not installed here, so a runtime smoke test still needs
+to happen on a machine with Antigravity.
+
+- Hook commands run synchronously from the plugin root, receive camelCase JSON
+  on stdin, and return one JSON object on stdout. The documented default timeout
+  is 30 seconds. A non-zero exit is logged and ignored by the plugin host, so
+  hooks should fail open and keep diagnostics off stdout.
+- Installed plugin files live in a read-only directory and are replaced when
+  the plugin updates. Hook commands should use paths relative to the plugin
+  root. `${PLUGIN_DATA}` is documented for plugin MCP server processes; the
+  docs do not promise it in shell hook environments. Keep durable state outside
+  the install tree, using TokenEconomizer's private `~/.tokeneconomizer` state
+  root with an Antigravity host namespace unless live tests identify a better
+  supported writable location.
+- Hook payloads include `conversationId`, `workspacePaths`, `transcriptPath`,
+  `artifactDirectoryPath`, `modelName`, and `lastUserInput`. Transcript paths
+  are under a different app-data root for App, CLI, and IDE. The adapter must
+  support multiple workspace paths and must not assume the first path is always
+  the repository root.
+- `SessionStart` fires once per new conversation and can inject startup steps.
+  `PreInvocation` fires before model calls and includes `invocationNum` and
+  `initialNumSteps`; it is not a `UserPromptSubmit` event. `PostInvocation` runs
+  after each model invocation. `Stop` is an execution-loop stop event, not an
+  upstream `SessionEnd`; it reports `executionNum`, `terminationReason`, and
+  `fullyIdle` (whether background work has completed).
+- `PostToolUse` receives the tool call, step index, and an optional error, but
+  its documented output is `{}`. It cannot deliver a redirect in that response.
+  Read and parse the transcript for tool results, and inject a loop-guard nudge
+  on a later `PreInvocation` or use `Stop` only after live behavior is verified.
+- `PreToolUse` can allow, deny, ask, or rewrite a tool call. Blocking a call is
+  not the same as removing its tool schema from the prompt. `Stop` can return
+  `decision: "continue"` and a reason to re-enter the loop, so using it adds
+  another model invocation and must remain a carefully bounded intervention.
+- The CLI's separate status-line script payload includes context-window token
+  counts and an estimated-cost object. Those fields are not part of the hook
+  payload contract, and the docs don't specify an equivalent plugin hook for
+  App or IDE. Treat status-line accounting as a CLI-only optional integration;
+  inspect transcripts and other surfaces before claiming cross-surface costs.
+- Antigravity already supports lazy MCP tool discovery; tools can be marked
+  always-loaded by MCP metadata. This does not expose a documented mechanism
+  for dynamically removing built-in tool definitions from the primary agent.
+  A custom agent's tool allowlist is opt-in and does not transparently prune the
+  user's selected agent.
+
+Antigravity's hook contract differs materially from the current upstream host
+adapters. Add a dedicated adapter and preserve the above lifecycle semantics;
+do not map events onto Claude/Codex event names just to reuse their assumptions.
 
 ## Upstream-to-Antigravity mapping
 
 | TokenEconomizer mechanism | Antigravity integration | Design decision / validation needed |
 | --- | --- | --- |
-| Micro-skills | `SessionStart` reads the repository's confirmed facts and injects concise context. `PostToolUse` records observations; `Stop` can schedule a fold when the conversation is fully idle. | Antigravity has no upstream-style `SessionEnd`; establish how `Stop`, `executionNum`, and `fullyIdle` map to a foldable session. Store state by Antigravity conversation and repository identity. |
-| Failure-loop guard | Track tool calls/errors from `PostToolUse`; use `PreInvocation` to inject a redirect when a prior assessment finds a repeated failure loop. Use the existing judge and redirect wording where host behavior permits. | `PreInvocation` runs before each model invocation, not necessarily once per user prompt. Verify how to identify a prompt-turn and what transcript data is available. Assess asynchronously if the hook can reliably retrieve a completed verdict. Do not force continuation from `Stop` until interactive behavior is verified. |
-| Tool pruning | Learn usage evidence from tool events/catalog data. Expose proposals and a reversible restore path. | `PreToolUse` can deny, ask, or rewrite a call, but that does not itself remove a tool definition from the model context. Verify whether Antigravity exposes a supported way to hide/remove tool definitions. Do not claim token savings from blocking calls; if there is no native schema-pruning surface, ship proposal-only or mark this mechanism unsupported. |
-| User-facing commands | Bundle Antigravity skills for status, configuration, micro-skills, and tool-pruning management, with helper scripts in the plugin. | Confirm skill discovery and slash-command behavior in App, CLI, and IDE. Keep each skill's `name` aligned with its folder name. |
-| Session cost reporting | Reuse upstream pricing and ledger logic when Antigravity exposes enough token usage metadata. | Inspect Antigravity transcript/event logs and confirm whether input, cached, output, and auxiliary model-call usage are available. Report unavailable fields honestly; do not infer billed cost from invocation counts. |
+| Micro-skills | `SessionStart` injects confirmed repository facts. `PostToolUse` schedules short event capture; read results from `transcriptPath`. `Stop` folds completed work only when `fullyIdle` is true. | Verify transcript readability, append timing, compaction, and resume behavior in App, CLI, and IDE. Use `conversationId` for conversation identity, but derive prompt turns from `lastUserInput`, transcript steps, and invocation metadata. |
+| Failure-loop guard | Read tool results/errors from the persistent transcript; queue or assess repeated failures away from the synchronous hook path. Inject a bounded advisory redirect on `PreInvocation`. | The hook payload lacks tool output and `PostToolUse` returns `{}`. Verify transcript format and per-turn boundaries. The hook contract does not provide a model-call API; prove how to make proposer/judge calls through the user's Agy auth without recursive hooks, or keep those model-backed features off. |
+| Tool pruning | Collect usage evidence and offer a reviewable proposal. Optionally document Agy's built-in lazy MCP discovery. | There is no documented primary-agent API to remove tool definitions dynamically. A custom agent tool allowlist is opt-in and static; do not market call-denial or a custom agent as transparent token-saving pruning. |
+| User-facing commands | Bundle skills for status, configuration, micro-skills, and tool-pruning management, with helper scripts inside the plugin. | Skills load their name/description at startup and full instructions on demand; test slash invocation and skill names in App, CLI, and IDE. |
+| Session cost reporting | Reuse upstream pricing only where real usage data exists. A separate CLI status-line payload exposes context counts and an estimated-cost object. | The plugin hook contract contains no usage fields. The status-line interface is CLI-specific and isn't listed as a plugin component. Verify transcripts and App/IDE support before implementing a cross-surface ledger; distinguish estimated spend from billed spend. |
 
 ## Implementation milestones
 
 ### 0. Capability spike
 
 Before changing the shared engine, capture real event fixtures and answer these
-questions on supported Antigravity CLI and IDE versions:
+questions on supported Antigravity App, CLI, and IDE versions:
 
-- What exact payloads arrive for every target event, including missing files,
-  failed tools, asynchronous/background commands, and resumed conversations?
-- Does `PreInvocation` distinguish a new user prompt from another model
-  invocation in the same turn?
-- What transcript format and token-usage fields are available to plugin hooks?
-- Can a plugin safely enumerate or suppress available tools before prompt
-  construction, or only deny calls in `PreToolUse`?
-- Which Python executable is available to hooks on macOS, Linux, and Windows,
-  and what hook timeout behavior applies?
-- Does `Stop` with `decision: "continue"` behave consistently in interactive
-  and headless runs, and how does `fullyIdle` affect background commands?
+- Can hook subprocesses read `transcriptPath` on each surface and under the
+  workspace sandbox? Does the transcript expose completed tool output, usage,
+  compaction boundaries, and stable event ordering while it is still being
+  written?
+- How do `invocationNum`, `initialNumSteps`, and `lastUserInput` behave across
+  multiple model calls for one prompt, queued prompts, resumes, and compaction?
+- How does `Stop` fire across normal completion, max-step termination, errors,
+  cancellation, and background tasks? Is `fullyIdle` reliable before folding?
+- Are hook command timeouts and fail-open behavior consistent across App, CLI,
+  and IDE? Which Python launchers and shells are available on macOS, Linux, and
+  Windows?
+- Can an installed plugin call an Agy model using the active user's auth and
+  billing without launching a recursively hooked Agy session? What permissions
+  and latency apply? If this is unsupported, which mechanisms work without a
+  judge/proposer model call?
+- Is there any supported API for dynamic built-in tool-schema pruning? How does
+  built-in lazy MCP discovery interact with plugin-provided MCP tools and
+  customization token budgets?
+- Can the separate CLI status-line context/cost payload be installed or
+  integrated from a plugin without overwriting a user's existing status-line
+  customization? What usage information exists in App and IDE?
 
 Record confirmed behavior and unsupported cases in the host adapter docs. Treat
 any answer that differs across App, CLI, and IDE as a per-surface capability.
+This workspace has no `agy` executable, so live validation must run on an
+Antigravity-enabled machine before the port is considered runtime-compatible.
 
 ### 1. Native plugin shell
 
@@ -70,8 +129,10 @@ any answer that differs across App, CLI, and IDE as a per-surface capability.
 - Add a marketplace-facing `README.md`, plugin-level `hooks.json`, and bundled
   launcher scripts using paths relative to the plugin root.
 - Add `agy plugin validate --strict` and local install instructions.
-- Keep runtime state outside the installed plugin directory; installed plugin
-  files may be read-only or replaced during upgrades.
+- Keep runtime state outside the read-only installed plugin directory; do not
+  assume hooks inherit the MCP-only `${PLUGIN_DATA}` variable.
+- Use short hook handlers and explicit timeouts. Queue expensive work so hook
+  time does not consume the default 30-second limit.
 
 ### 2. Antigravity host adapter
 
@@ -93,7 +154,9 @@ any answer that differs across App, CLI, and IDE as a per-surface capability.
   pricing, and ledger code where the event semantics match.
 - Preserve upstream confirmation thresholds and per-mechanism configuration;
   keep micro-skills off by default if they require proposer model calls.
-- Run folds/proposer/judge work outside latency-sensitive hooks where possible.
+- Run folds/proposer/judge work outside latency-sensitive synchronous hooks
+  where possible. Use a native authenticated model-call path only after the
+  capability spike verifies it; otherwise leave model-backed pieces disabled.
 - Inject only concise, bounded context. A loop redirect is advisory and
   reversible; the plugin must not stop or kill a user task.
 - Treat Antigravity token accounting as unsupported until transcript usage is
@@ -134,6 +197,8 @@ any answer that differs across App, CLI, and IDE as a per-surface capability.
   clear and reversible.
 - No plugin-owned API key is needed. Any model calls use Antigravity's supported
   model/auth path and are included in cost reporting if usage is exposed.
+- Hook commands work with the read-only install layout, use persistent writable
+  state safely, and stay within the configured timeout on App, CLI, and IDE.
 - Tool pruning is advertised as token-saving only if definitions are removed
   before model context construction; otherwise it remains a reviewed proposal.
 - Unsupported usage metrics or host events are reported as unavailable instead
@@ -153,3 +218,5 @@ any answer that differs across App, CLI, and IDE as a per-surface capability.
 - Antigravity plugins: <https://antigravity.google/docs/plugins/>
 - Antigravity hooks: <https://antigravity.google/docs/hooks/>
 - Antigravity plugin build guide: <https://antigravity.google/docs/build-plugins/>
+- Antigravity CLI status line: <https://antigravity.google/docs/cli/statusline/>
+- Antigravity CLI changelog: <https://antigravity.google/docs/changelog?tab=cli>
