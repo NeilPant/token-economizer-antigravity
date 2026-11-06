@@ -1,0 +1,15 @@
+{
+  "token-economizer": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ./scripts/te-hook.py SessionStart",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

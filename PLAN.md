@@ -1,6 +1,6 @@
 # Porting plan: TokenEconomizer for Antigravity
 
-**Status:** planning scaffold; no port code has been added yet  
+**Status:** initial native bundle implemented; runtime validation and mechanism hooks remain
 **Upstream:** [microsoft/TokenEconomizer](https://github.com/microsoft/TokenEconomizer)  
 **Target:** native Google Antigravity (Agy) plugin for App, CLI, and IDE
 
@@ -23,8 +23,9 @@ Antigravity plugins are versioned directories with a required `plugin.json` and
 optional skills, MCP servers, custom agents, rules, and lifecycle hooks. The
 same plugin format is supported by the App, CLI, and IDE. Plugins can be
 installed from a local path or GitHub URL, and App installations sync into the
-CLI's installed list. The plan is to use a native manifest, skills, and
-`hooks.json`, not to wrap the existing plugin in a separate service.
+CLI's installed list. The initial bundle now has a native manifest, skills,
+`hooks.json`, and bundled Python scripts; it does not wrap the existing plugin
+in a separate service.
 
 ### Runtime behavior confirmed in the official docs
 
@@ -77,11 +78,29 @@ Antigravity's hook contract differs materially from the current upstream host
 adapters. Add a dedicated adapter and preserve the above lifecycle semantics;
 do not map events onto Claude/Codex event names just to reuse their assumptions.
 
+## Current implementation slice
+
+- The upstream Python core is vendored under `tokeneconomizer/` with its
+  Apache-2.0 license and source attribution.
+- `plugin.json`, `hooks.json`, a bundled icon, and two native skills are in place.
+  The only registered lifecycle hook is `SessionStart`, which injects existing
+  cached facts using Antigravity's documented `injectSteps` response shape.
+- The Antigravity adapter normalizes the documented camelCase fields, uses
+  `conversationId` as the session key, and declines to pin state when mounted
+  workspaces cannot be resolved to one repository.
+- Status and config skills run the shared CLI with `--host antigravity`.
+  Model-backed side calls return no answer until an Agy-native authenticated
+  model path is verified; they never fall through to Claude Code.
+- Loop guarding, transcript folding, tool-catalog learning/pruning, and Agy cost
+  reporting are not registered or claimed as working yet.
+- `agy plugin validate --strict` and local installation have not been run because
+  this workspace has no Antigravity CLI or App installation.
+
 ## Upstream-to-Antigravity mapping
 
 | TokenEconomizer mechanism | Antigravity integration | Design decision / validation needed |
 | --- | --- | --- |
-| Micro-skills | `SessionStart` injects confirmed repository facts. `PostToolUse` schedules short event capture; read results from `transcriptPath`. `Stop` folds completed work only when `fullyIdle` is true. | Verify transcript readability, append timing, compaction, and resume behavior in App, CLI, and IDE. Use `conversationId` for conversation identity, but derive prompt turns from `lastUserInput`, transcript steps, and invocation metadata. |
+| Micro-skills | The native adapter can inject already-cached facts at `SessionStart`. No Agy fold hook is registered yet. | Verify transcript readability, append timing, compaction, and resume behavior in App, CLI, and IDE before wiring conversation folding. |
 | Failure-loop guard | Read tool results/errors from the persistent transcript; queue or assess repeated failures away from the synchronous hook path. Inject a bounded advisory redirect on `PreInvocation`. | The hook payload lacks tool output and `PostToolUse` returns `{}`. Verify transcript format and per-turn boundaries. The hook contract does not provide a model-call API; prove how to make proposer/judge calls through the user's Agy auth without recursive hooks, or keep those model-backed features off. |
 | Tool pruning | Collect usage evidence and offer a reviewable proposal. Optionally document Agy's built-in lazy MCP discovery. | There is no documented primary-agent API to remove tool definitions dynamically. A custom agent tool allowlist is opt-in and static; do not market call-denial or a custom agent as transparent token-saving pruning. |
 | User-facing commands | Bundle skills for status, configuration, micro-skills, and tool-pruning management, with helper scripts inside the plugin. | Skills load their name/description at startup and full instructions on demand; test slash invocation and skill names in App, CLI, and IDE. |
@@ -90,6 +109,8 @@ do not map events onto Claude/Codex event names just to reuse their assumptions.
 ## Implementation milestones
 
 ### 0. Capability spike
+
+**Status: pending live Antigravity access.**
 
 Before changing the shared engine, capture real event fixtures and answer these
 questions on supported Antigravity App, CLI, and IDE versions:
@@ -123,6 +144,8 @@ Antigravity-enabled machine before the port is considered runtime-compatible.
 
 ### 1. Native plugin shell
 
+**Status: initial slice added; strict validation and installation pending.**
+
 - Add a strict-schema `plugin.json` with a kebab-case plugin name, accurate
   version, upstream attribution, Apache-2.0 license, repository URL, and up to
   three suggested prompts.
@@ -136,6 +159,8 @@ Antigravity-enabled machine before the port is considered runtime-compatible.
 
 ### 2. Antigravity host adapter
 
+**Status: initial `SessionStart` normalization added; other events not wired.**
+
 - Add `antigravity` as a host in the shared adapter/controller path, with
   Antigravity-specific event parsing and output serialization.
 - Normalize `conversationId`, `workspacePaths`, `transcriptPath`, `modelName`,
@@ -145,6 +170,9 @@ Antigravity-enabled machine before the port is considered runtime-compatible.
   internal error must leave the agent running and return a no-op response.
 - Prevent the plugin's own judge/proposer calls from recursively triggering its
   hooks, following the existing upstream side-call guard.
+- Keep proposer/judge calls inert until an Agy-authenticated model-call path is
+  verified; the current runner returns no answer rather than falling through to
+  another installed agent's CLI.
 - Keep repository data isolated by canonical repository identity and plugin
   state isolated by host/conversation identity.
 

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "token-economizer",
+  "displayName": "TokenEconomizer",
+  "version": "0.1.0",
+  "description": "Native Antigravity packaging for TokenEconomizer, with repository-scoped state and a startup hook; additional runtime mechanisms remain under validation.",
+  "logo": "assets/token-economizer.svg",
+  "suggestedPrompts": [
+    "Show TokenEconomizer status for this repository",
+    "Show the configuration used by TokenEconomizer",
+    "What TokenEconomizer features are currently supported in Antigravity?"
+  ],
+  "author": {
+    "name": "TokenEconomizer for Antigravity contributors",
+    "url": "https://github.com/NeilPant/token-economizer-antigravity"
+  },
+  "homepage": "https://github.com/microsoft/TokenEconomizer",
+  "repository": "https://github.com/NeilPant/token-economizer-antigravity",
+  "license": "Apache-2.0",
+  "keywords": ["token-economizer", "coding-agents", "micro-skills", "cost-optimization"]
+}
