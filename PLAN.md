@@ -1,6 +1,6 @@
 # Porting plan: TokenEconomizer for Antigravity
 
-**Status:** initial native bundle implemented; runtime validation and mechanism hooks remain
+**Status:** native bundle and initial Antigravity CLI runtime smoke-tested (Agy CLI 1.5.2 on macOS); App/IDE verification and mechanism hooks remain
 **Upstream:** [microsoft/TokenEconomizer](https://github.com/microsoft/TokenEconomizer)  
 **Target:** native Google Antigravity (Agy) plugin for App, CLI, and IDE
 
@@ -29,9 +29,12 @@ in a separate service.
 
 ### Runtime behavior confirmed in the official docs
 
-These are documented contracts, not live observations from this workspace.
-The `agy` executable is not installed here, so a runtime smoke test still needs
-to happen on a machine with Antigravity.
+These contracts come from the official docs. The initial live validation used
+Antigravity CLI 1.5.2 on macOS: strict plugin validation passed, local install
+and plugin discovery succeeded, the SessionStart hook created a repository and
+session record, and the status skill ran from a live CLI session. The App and
+standalone IDE have not had separate runtime smoke tests, and only SessionStart
+has been exercised end to end.
 
 - Hook commands run synchronously from the plugin root, receive camelCase JSON
   on stdin, and return one JSON object on stdout. The documented default timeout
@@ -93,8 +96,10 @@ do not map events onto Claude/Codex event names just to reuse their assumptions.
   model path is verified; they never fall through to Claude Code.
 - Loop guarding, transcript folding, tool-catalog learning/pruning, and Agy cost
   reporting are not registered or claimed as working yet.
-- `agy plugin validate --strict` and local installation have not been run because
-  this workspace has no Antigravity CLI or App installation.
+- `agy plugin validate --strict` passed and local installation succeeded with
+  Antigravity CLI 1.5.2 on macOS. The SessionStart hook and status skill were
+  smoke-tested in live CLI sessions; other Agy surfaces and upstream mechanisms
+  remain unverified or unsupported.
 
 ## Upstream-to-Antigravity mapping
 
@@ -110,7 +115,7 @@ do not map events onto Claude/Codex event names just to reuse their assumptions.
 
 ### 0. Capability spike
 
-**Status: pending live Antigravity access.**
+**Status: initial CLI check completed; cross-surface and lifecycle capability work remains.**
 
 Before changing the shared engine, capture real event fixtures and answer these
 questions on supported Antigravity App, CLI, and IDE versions:
@@ -139,12 +144,13 @@ questions on supported Antigravity App, CLI, and IDE versions:
 
 Record confirmed behavior and unsupported cases in the host adapter docs. Treat
 any answer that differs across App, CLI, and IDE as a per-surface capability.
-This workspace has no `agy` executable, so live validation must run on an
-Antigravity-enabled machine before the port is considered runtime-compatible.
+Initial CLI checks were run on Antigravity CLI 1.5.2 on macOS. Repeat and extend
+the checks on the Antigravity App and standalone IDE before claiming those
+surfaces are runtime-compatible.
 
 ### 1. Native plugin shell
 
-**Status: initial slice added; strict validation and installation pending.**
+**Status: initial slice added; strict validation and local installation passed on Agy CLI 1.5.2.**
 
 - Add a strict-schema `plugin.json` with a kebab-case plugin name, accurate
   version, upstream attribution, Apache-2.0 license, repository URL, and up to
