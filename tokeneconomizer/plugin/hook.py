@@ -2,7 +2,8 @@
 # event name from the native plugin launcher and skips payloads without a safe workspace.
 """The entry point every plugin hook executes: hook JSON on stdin, hook JSON on stdout.
 
-    python -m tokeneconomizer.plugin.hook [--host claude|codex|copilot|hermes|opencode|pi]
+    python -m tokeneconomizer.plugin.hook
+        [--host claude|codex|copilot|hermes|opencode|pi|antigravity]
 
 It never fails the agent. Whatever goes wrong -- unreadable input, a full disk, a bug -- the hook
 prints `{}` (which changes nothing) and records the traceback in `<state root>/errors.log`. It
