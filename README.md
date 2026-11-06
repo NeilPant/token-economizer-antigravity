@@ -60,7 +60,7 @@ The validator should report two skills and one hook, then the install command sh
 
 ### Install in the Antigravity App or IDE
 
-Plugins installed through Agy are shared with the Antigravity App. In the App, open **Customizations → Installed** to confirm the plugin is enabled. In the standalone Antigravity IDE, a workspace-only local plugin can be placed under `.agents/plugins/` at the workspace root. For global manual installation, use `~/.gemini/config/plugins/`. The plugin was tested in the CLI; the App and standalone IDE have not yet had separate runtime smoke tests.
+To install or inspect the plugin in the Antigravity App, open **Customizations → Marketplace/Installed**. The official docs confirm that App-installed plugins appear in the CLI; this port has not separately verified that a CLI-installed copy is active in the App. In the standalone Antigravity IDE, a workspace-only local plugin can be placed under `.agents/plugins/` at the workspace root. For global manual installation, use `~/.gemini/config/plugins/`. The plugin was tested in the CLI; the App and standalone IDE have not yet had separate runtime smoke tests.
 
 In the CLI's interactive session, `/plugin` opens the plugin manager. Use its Installed tab to inspect or enable/disable the plugin.
 
