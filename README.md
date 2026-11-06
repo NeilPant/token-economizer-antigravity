@@ -2,7 +2,7 @@
 
 An independent, native [Google Antigravity](https://antigravity.google/) plugin port of Microsoft's [TokenEconomizer](https://github.com/microsoft/TokenEconomizer).
 
-> **Port status:** The plugin installs and runs in the Antigravity CLI. The current Agy adapter registers a session-start hook and provides two working skills for status and configuration. This is an initial integration, not a complete port of every upstream mechanism. Agy conversation folding, real-time loop intervention, tool pruning, and Agy token/cost accounting are not implemented.
+> **Port status:** The plugin installs and runs in the Antigravity CLI. The adapter now records prompt turns, applies the rule-based loop guard, folds quiet conversations, and counts token usage from Agy transcripts. Agy tool pruning and its optional model-backed judge/distiller calls remain unavailable. Token costs are estimates, not billed amounts.
 
 ## What this project is trying to do
 
@@ -17,15 +17,17 @@ The port is being built incrementally. We only claim a feature works on Agy afte
 | Component | Agy support |
 | --- | --- |
 | Native plugin package | Validates with `agy plugin validate --strict` and installs from a local directory. |
-| Session-start hook | Registered and smoke-tested in Antigravity CLI. It associates the conversation with an unambiguous workspace repository and records session state. |
+| Session-start hook | Smoke-tested in Antigravity CLI. It associates the conversation with an unambiguous workspace repository, records session state, and can inject already-cached context. |
+| Prompt-turn hooks | `PreInvocation`, `PostToolUse`, and `Stop` record turns and completed tool errors. `PostToolUse` returns `{}` as required by Agy. |
 | Status skill | `/token-economizer-status` runs and reports configuration and saved state. |
 | Configuration skill | `/token-economizer-config` displays the current configuration. |
-| Cached micro-skill injection | The adapter can format cached facts for Agy's session-start response, but Agy-side learning/folding is not implemented, so this does not currently produce learned facts. |
-| Failure-loop guard | Not active on Agy. |
+| Micro-skills | The shared fact learner can fold Agy transcripts after a quiet period. Set `microskills=envfacts` for its non-model fact extraction; the model-backed distiller is unavailable on Agy. Cached facts can be injected at session start. |
+| Failure-loop guard | Active as a rule-only guard. It learns resolved-turn lengths, detects repeated failure loops, and queues a bounded nudge for the next `PreInvocation`. Agy-native model judge/writer calls are not available. |
 | Tool pruning | Not supported on Agy. Agy does not expose a verified API for removing built-in tool definitions from the active agent. |
-| Session folding and token/cost accounting | Not implemented for Agy. |
+| Session folding | A detached worker folds a conversation after its transcript stays quiet for ten minutes; the next session start also picks up stale sessions. |
+| Token accounting | Folded Agy CLI transcripts provide per-model input, cache, and output token counts. The effective-token cost is an estimate, labelled `fallback` when the model has no entry in the upstream price table; it is not billed USD. |
 
-The port has been checked with Antigravity CLI 1.5.2 on macOS. That confirms the CLI install, hook, and status-skill path; it does not certify the standalone App, IDE, other operating systems, or all upstream mechanisms.
+The port has been checked with Antigravity CLI 1.5.2 on macOS. Live CLI smoke checks exercised session start, a tool call, turn closure, and the status skill. A repeated-failure fixture verified rule-based nudging, and folding a real CLI transcript recorded prompt and token totals. The ten-minute quiet-time worker was started by the Stop hook. This does not certify the standalone App, IDE, other operating systems, or every upstream mechanism.
 
 ## Requirements
 
@@ -86,7 +88,7 @@ TokenEconomizer stores runtime state outside the plugin install directory, which
 - Repository identity is derived from the Git remote when available, so sessions from the same repository can share repository-scoped state.
 - Antigravity sessions are recorded in the `antigravity` host namespace.
 
-The configuration skill displays the values currently read by the shared TokenEconomizer core. Do not turn on unfinished Agy mechanisms expecting them to start working: folding, loop guarding, tool pruning, and usage accounting require additional Agy-specific implementation and validation.
+The configuration skill displays values read by the shared TokenEconomizer core. On Agy, `microskills=envfacts` enables non-model fact extraction after a conversation is folded; `microskills=envfacts+distiller` cannot use its model-backed distiller because Agy exposes no supported model-call API to plugin hooks. `toolprune` remains unavailable regardless of its shared-core setting.
 
 ## Verify, update, disable, or remove
 
@@ -129,7 +131,7 @@ agy plugin validate --strict .
 agy plugin install .
 ```
 
-The native bundle is made from `plugin.json`, `hooks.json`, `skills/`, `scripts/`, and the shared `tokeneconomizer/` Python package. The Agy adapter is in `tokeneconomizer/plugin/hosts.py`; the hook entry point is `scripts/te-hook.py`. Agy hook commands run from the plugin root, receive JSON on standard input, and must return their JSON response on standard output. The launcher keeps diagnostics away from the hook's JSON output and fails open when the runtime cannot process an event.
+The native bundle is made from `plugin.json`, `hooks.json`, `skills/`, `scripts/`, and the shared `tokeneconomizer/` Python package. The Agy adapter is in `tokeneconomizer/plugin/hosts.py`; transcript normalization is in `tokeneconomizer/trace/antigravity.py`; the hook entry point is `scripts/te-hook.py`. Agy hook commands run from the plugin root, receive JSON on standard input, and must return their JSON response on standard output. The launcher keeps diagnostics away from the hook's JSON output and fails open when the runtime cannot process an event.
 
 When changing the adapter, preserve Agy's camelCase payload fields and hook response formats. Validate with the Agy CLI after editing the manifest, skills, or hook configuration. Before enabling new lifecycle events, verify their semantics and behavior on each claimed Antigravity surface; see the acceptance criteria in [PLAN.md](PLAN.md).
 

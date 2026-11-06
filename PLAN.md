@@ -1,6 +1,6 @@
 # Porting plan: TokenEconomizer for Antigravity
 
-**Status:** native bundle and initial Antigravity CLI runtime smoke-tested (Agy CLI 1.5.2 on macOS); App/IDE verification and mechanism hooks remain
+**Status:** core hooks, rule-based loop guard, idle transcript folding, and transcript token accounting implemented and smoke-tested on Antigravity CLI 1.5.2 (macOS); App/IDE verification and tool pruning remain
 **Upstream:** [microsoft/TokenEconomizer](https://github.com/microsoft/TokenEconomizer)  
 **Target:** native Google Antigravity (Agy) plugin for App, CLI, and IDE
 
@@ -30,11 +30,11 @@ in a separate service.
 ### Runtime behavior confirmed in the official docs
 
 These contracts come from the official docs. The initial live validation used
-Antigravity CLI 1.5.2 on macOS: strict plugin validation passed, local install
-and plugin discovery succeeded, the SessionStart hook created a repository and
-session record, and the status skill ran from a live CLI session. The App and
-standalone IDE have not had separate runtime smoke tests, and only SessionStart
-has been exercised end to end.
+Antigravity CLI 1.5.2 on macOS: strict plugin validation and local installation
+passed. Live checks exercised session start, a model/tool turn, turn closure,
+real transcript normalization and token accounting. A repeated-failure hook
+fixture verified the rule-only guard. The App and standalone IDE have not had
+separate runtime smoke tests.
 
 - Hook commands run synchronously from the plugin root, receive camelCase JSON
   on stdin, and return one JSON object on stdout. The documented default timeout
@@ -60,8 +60,8 @@ has been exercised end to end.
   `fullyIdle` (whether background work has completed).
 - `PostToolUse` receives the tool call, step index, and an optional error, but
   its documented output is `{}`. It cannot deliver a redirect in that response.
-  Read and parse the transcript for tool results, and inject a loop-guard nudge
-  on a later `PreInvocation` or use `Stop` only after live behavior is verified.
+  The adapter queues loop-guard context and delivers it through a later
+  `PreInvocation`; completed transcripts are normalized for folding.
 - `PreToolUse` can allow, deny, ask, or rewrite a tool call. Blocking a call is
   not the same as removing its tool schema from the prompt. `Stop` can return
   `decision: "continue"` and a reason to re-enter the loop, so using it adds
@@ -78,38 +78,43 @@ has been exercised end to end.
   user's selected agent.
 
 Antigravity's hook contract differs materially from the current upstream host
-adapters. Add a dedicated adapter and preserve the above lifecycle semantics;
-do not map events onto Claude/Codex event names just to reuse their assumptions.
+adapters. The dedicated adapter preserves these lifecycle semantics; it does
+not map events onto Claude/Codex event names just to reuse their assumptions.
 
 ## Current implementation slice
 
 - The upstream Python core is vendored under `tokeneconomizer/` with its
   Apache-2.0 license and source attribution.
 - `plugin.json`, `hooks.json`, a bundled icon, and two native skills are in place.
-  The only registered lifecycle hook is `SessionStart`, which injects existing
-  cached facts using Antigravity's documented `injectSteps` response shape.
+  `SessionStart` injects cached facts; `PreInvocation`, `PostToolUse`, and `Stop`
+  track turns and failures. `PostToolUse` returns `{}`; queued nudges are sent
+  with `PreInvocation` `injectSteps`.
 - The Antigravity adapter normalizes the documented camelCase fields, uses
   `conversationId` as the session key, and declines to pin state when mounted
   workspaces cannot be resolved to one repository.
 - Status and config skills run the shared CLI with `--host antigravity`.
   Model-backed side calls return no answer until an Agy-native authenticated
   model path is verified; they never fall through to Claude Code.
-- Loop guarding, transcript folding, tool-catalog learning/pruning, and Agy cost
-  reporting are not registered or claimed as working yet.
-- `agy plugin validate --strict` passed and local installation succeeded with
-  Antigravity CLI 1.5.2 on macOS. The SessionStart hook and status skill were
-  smoke-tested in live CLI sessions; other Agy surfaces and upstream mechanisms
-  remain unverified or unsupported.
+- The rule-only loop guard uses observed repeated errors and learned turn
+  lengths; Agy model-backed judge/proposer calls remain unavailable. A Stop hook
+  starts a worker that folds a transcript after ten quiet minutes. The adapter
+  counts token fields recorded in Agy CLI transcripts and labels unknown-model
+  pricing as a fallback estimate, not billed USD.
+- Tool-catalog learning/pruning is unavailable because Agy exposes no verified
+  API to remove built-in tool definitions from the active agent.
+- Strict validation, local install, live CLI tool-turn hooks, transcript folding,
+  token totals, and a repeated-failure guard fixture were checked on Agy CLI
+  1.5.2/macOS. App and standalone IDE remain unverified.
 
 ## Upstream-to-Antigravity mapping
 
 | TokenEconomizer mechanism | Antigravity integration | Design decision / validation needed |
 | --- | --- | --- |
-| Micro-skills | The native adapter can inject already-cached facts at `SessionStart`. No Agy fold hook is registered yet. | Verify transcript readability, append timing, compaction, and resume behavior in App, CLI, and IDE before wiring conversation folding. |
-| Failure-loop guard | Read tool results/errors from the persistent transcript; queue or assess repeated failures away from the synchronous hook path. Inject a bounded advisory redirect on `PreInvocation`. | The hook payload lacks tool output and `PostToolUse` returns `{}`. Verify transcript format and per-turn boundaries. The hook contract does not provide a model-call API; prove how to make proposer/judge calls through the user's Agy auth without recursive hooks, or keep those model-backed features off. |
+| Micro-skills | Cached facts inject at `SessionStart`; quiet Agy CLI transcripts are folded into shared non-model facts. | CLI transcript format and token fields were exercised; App/IDE transcript behavior remains unverified. The model-backed distiller is unavailable. |
+| Failure-loop guard | Rule-only guard observes tool failures and injects a bounded advisory nudge at a later `PreInvocation`. | Repeated-failure hook fixture verified the nudge and `{}` `PostToolUse` response. No Agy-native model judge/writer path is available. |
 | Tool pruning | Collect usage evidence and offer a reviewable proposal. Optionally document Agy's built-in lazy MCP discovery. | There is no documented primary-agent API to remove tool definitions dynamically. A custom agent tool allowlist is opt-in and static; do not market call-denial or a custom agent as transparent token-saving pruning. |
 | User-facing commands | Bundle skills for status, configuration, micro-skills, and tool-pruning management, with helper scripts inside the plugin. | Skills load their name/description at startup and full instructions on demand; test slash invocation and skill names in App, CLI, and IDE. |
-| Session cost reporting | Reuse upstream pricing only where real usage data exists. A separate CLI status-line payload exposes context counts and an estimated-cost object. | The plugin hook contract contains no usage fields. The status-line interface is CLI-specific and isn't listed as a plugin component. Verify transcripts and App/IDE support before implementing a cross-surface ledger; distinguish estimated spend from billed spend. |
+| Session cost reporting | Folded CLI transcripts provide per-model input/cache/output token totals; cost is estimated from upstream pricing. | A real transcript was counted. Unknown model pricing is labeled fallback; these totals are not billed spend. App/IDE accounting remains unverified. |
 
 ## Implementation milestones
 
@@ -165,7 +170,7 @@ surfaces are runtime-compatible.
 
 ### 2. Antigravity host adapter
 
-**Status: initial `SessionStart` normalization added; other events not wired.**
+**Status: SessionStart, PreInvocation, PostToolUse, and Stop wired and CLI-smoke-tested.**
 
 - Add `antigravity` as a host in the shared adapter/controller path, with
   Antigravity-specific event parsing and output serialization.
@@ -182,7 +187,7 @@ surfaces are runtime-compatible.
 - Keep repository data isolated by canonical repository identity and plugin
   state isolated by host/conversation identity.
 
-### 3. Micro-skills and loop guard
+### 3. Micro-skills, loop guard, and accounting
 
 - Reuse upstream fact extraction, contradiction handling, turn-state detection,
   pricing, and ledger code where the event semantics match.
@@ -193,8 +198,8 @@ surfaces are runtime-compatible.
   capability spike verifies it; otherwise leave model-backed pieces disabled.
 - Inject only concise, bounded context. A loop redirect is advisory and
   reversible; the plugin must not stop or kill a user task.
-- Treat Antigravity token accounting as unsupported until transcript usage is
-  verified end to end.
+- Count only token fields found in Agy model transcript records; report fallback
+  pricing as an estimate and never present it as billed USD.
 
 ### 4. Tool pruning and commands
 

@@ -641,6 +641,36 @@ def cmd_config(args):
 def cmd_fold(args):
     # A session is folded into the repository it is pinned to, wherever `--cwd` points.
     ctx = _session_ctx(args, (args.session or [None])[0])
+    if args.wait_idle and args.session:
+        import hashlib
+        sid = args.session[0]
+        lock = "idle-fold-" + hashlib.sha256(sid.encode("utf-8")).hexdigest()[:20]
+        # A Stop hook may start several workers as a conversation has multiple idle turns.
+        # Only one worker should watch a transcript; subsequent Stops are observed through its
+        # updated mtime and do not need another sleeping process.
+        with ctx.store.locked(lock, timeout=0) as got:
+            if not got:
+                return 0
+            deadline = time.time() + 24 * 3600
+            while time.time() < deadline:
+                if sid in (ctx.store.read("folded.json") or {}):
+                    return 0
+                sess = ctx.store.read(os.path.join("sessions", f"{sid}.json")) or {}
+                transcript = sess.get("transcript")
+                if not transcript:
+                    return 0
+                try:
+                    quiet = time.time() - ctx.host.last_active(transcript, sess)
+                except OSError:
+                    return 0
+                if quiet >= fold.STALE_S:
+                    rec = fold.fold_session(ctx, sid)
+                    if rec is not None and args.verbose:
+                        print(json.dumps(rec, default=str))
+                    return 0
+                time.sleep(min(max(fold.STALE_S - quiet, 1.0), 60.0,
+                               max(deadline - time.time(), 1.0)))
+        return 0
     sids = args.session or fold.pending_sessions(ctx)
     for sid in sids:
         rec = fold.fold_session(ctx, sid)
@@ -928,6 +958,8 @@ def build_parser():
     p.set_defaults(fn=cmd_config)
     p = add("fold")
     p.add_argument("--session", action="append")
+    p.add_argument("--wait-idle", action="store_true",
+                   help="wait for a session transcript to be quiet before folding it")
     p.add_argument("--verbose", action="store_true")
     p.set_defaults(fn=cmd_fold)
     p = add("judge")

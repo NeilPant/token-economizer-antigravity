@@ -6,6 +6,32 @@
         "command": "python3 ./scripts/te-hook.py SessionStart",
         "timeout": 5
       }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python3 ./scripts/te-hook.py PreInvocation",
+        "timeout": 5
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ./scripts/te-hook.py PostToolUse",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python3 ./scripts/te-hook.py Stop",
+        "timeout": 5
+      }
     ]
   }
 }

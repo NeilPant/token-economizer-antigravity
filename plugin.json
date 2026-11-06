@@ -3,7 +3,7 @@
   "name": "token-economizer",
   "displayName": "TokenEconomizer",
   "version": "0.1.0",
-  "description": "Native Antigravity packaging for TokenEconomizer, with repository-scoped state and a startup hook; additional runtime mechanisms remain under validation.",
+  "description": "Native Antigravity integration for TokenEconomizer with repository-scoped state, a rule-based loop guard, idle-time learning, and transcript token accounting.",
   "logo": "assets/token-economizer.svg",
   "suggestedPrompts": [
     "Show TokenEconomizer status for this repository",

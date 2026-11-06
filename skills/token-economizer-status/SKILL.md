@@ -5,6 +5,10 @@ compatibility: Requires Python 3.10 or newer on PATH.
 ---
 
 Run `python3 scripts/run.py status --explain` from this skill directory.
-Summarize the output accurately. Antigravity support is under development: the
-current native hook handles session start only, so do not say the loop guard,
-session folding, or token accounting is active.
+Summarize the output accurately. The Agy CLI integration uses session-start,
+pre-invocation, post-tool-use, and stop hooks. It folds a conversation after its
+transcript has been quiet for ten minutes, counts tokens recorded in the Agy
+transcript, and uses the rule-based loop guard without a model judge. Tool
+pruning is unavailable on Agy. Effective-token cost is an estimate and falls
+back to generic weights when the transcript's model has no price entry; it is
+not billed spend. App and IDE behavior has not been separately verified.

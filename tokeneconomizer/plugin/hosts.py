@@ -42,6 +42,7 @@ named `rollout-*`; Copilot's session-state transcript, or no transcript at all i
 hook process; Claude Code otherwise. Each plugin hook file except Claude Code's also passes
 `--host` explicitly, so detection is the fallback rather than the rule.
 """
+import hashlib
 import json
 import os
 import re
@@ -871,15 +872,39 @@ def _ancestor_args(limit=4):
 
 
 class Antigravity(Host):
-    """Initial native adapter for Antigravity's documented plugin hook contract.
-
-    This adapter intentionally starts with SessionStart only. Antigravity's tool outputs,
-    turn boundaries, transcript format, and conversation-fold lifecycle still need live
-    verification before the existing loop guard or session folding can be enabled safely.
-    """
+    """Native adapter for Antigravity lifecycle hooks and trajectory records."""
     name = "antigravity"
     prompt_context = True
     keeps_start_context = True
+
+    def turn_key(self, p):
+        prompt = str(p.get("last_user_input") or "")
+        if not prompt:
+            prompt = f"invocation:{p.get('invocation_num', '')}"
+        return hashlib.sha256(prompt.encode("utf-8", "replace")).hexdigest()[:24]
+
+    def stopped_normally(self, p):
+        return (p.get("termination_reason") == "model_stop" and
+                p.get("fully_idle") is True and not p.get("error"))
+
+    def tool_call(self, p):
+        call = p.get("tool_call") if isinstance(p.get("tool_call"), dict) else {}
+        name = str(call.get("name") or "")
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        mapped = {
+            "run_command": "bash", "write_to_file": "create",
+            "replace_file_content": "edit", "multi_replace_file_content": "edit",
+            "read_file": "view", "view_file": "view",
+        }.get(name.lower(), name)
+        normalized = dict(args)
+        command = args.get("CommandLine")
+        if command is not None:
+            normalized["command"] = command
+        target = args.get("TargetFile") or args.get("AbsolutePath")
+        if target is not None:
+            normalized["path"] = target
+        error = str(p.get("error") or "")
+        return mapped, normalized, (f"Error: {error}" if error else ""), 1 if error else None
 
     def session_id(self, p):
         return str(p.get("conversation_id") or p.get("session_id") or "")
@@ -918,13 +943,22 @@ class Antigravity(Host):
         p["artifact_directory_path"] = p.get("artifactDirectoryPath") or ""
         p["model_name"] = p.get("modelName") or ""
         p["last_user_input"] = p.get("lastUserInput") or ""
+        p["prompt"] = p["last_user_input"]
+        p["tool_call"] = p.get("toolCall") or p.get("tool_call") or {}
+        p["step_idx"] = p.get("stepIdx", p.get("step_idx"))
+        p["invocation_num"] = p.get("invocationNum", p.get("invocation_num"))
+        p["initial_num_steps"] = p.get("initialNumSteps", p.get("initial_num_steps"))
+        p["execution_num"] = p.get("executionNum", p.get("execution_num"))
+        p["termination_reason"] = p.get("terminationReason", p.get("termination_reason"))
+        p["fully_idle"] = p.get("fullyIdle", p.get("fully_idle"))
+        p["error"] = p.get("error") or ""
         p["hook_event_name"] = p.get("hook_event_name") or env.get("TE_HOOK_EVENT", "")
         return p
 
     def context(self, event, text):
-        # SessionStart supports injected trajectory steps. Other events are not registered by
-        # this first slice; in particular, PostToolUse documents an empty response contract.
-        if event != "SessionStart":
+        # PostToolUse explicitly accepts no response fields. The controller queues any live
+        # loop-guard guidance there and drains it from the next PreInvocation instead.
+        if event not in ("SessionStart", "PreInvocation", "PostInvocation"):
             return {}
         return {"injectSteps": [{"systemMessage": {
             "systemMessage": text,
@@ -934,9 +968,17 @@ class Antigravity(Host):
     def notice(self, text):
         return self.context("SessionStart", text)
 
+    def mechanism_trace(self, transcript_path, workdir):
+        if not transcript_path or not os.path.exists(transcript_path):
+            return None
+        out = os.path.join(workdir, "antigravity_trace.jsonl")
+        return out if trace.antigravity_to_claude(transcript_path, out) is not None else None
+
     def session_usage(self, transcript_path):
-        # Usage is not present in the documented hook payload; do not estimate it from steps.
-        return {}
+        return trace.antigravity_session_usage(transcript_path)
+
+    def prompt_count(self, transcript_path):
+        return trace.antigravity_prompt_count(transcript_path)
 
 
 HOSTS = {"claude": ClaudeCode, "codex": Codex, "copilot": Copilot, "opencode": OpenCode,

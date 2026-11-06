@@ -90,6 +90,7 @@ class LiveController:
         event = self.p.get("hook_event_name") or ""
         # PostToolUseFailure: Copilot reports a failed tool there, not in PostToolUse.
         handler = {"SessionStart": self.session_start, "UserPromptSubmit": self.user_prompt,
+                   "PreInvocation": self.pre_invocation,
                    "PostToolUse": self.post_tool, "PostToolUseFailure": self.post_tool,
                    "Stop": self.stop, "SessionEnd": self.session_end}.get(event)
         return (handler() or {}) if handler else {}
@@ -103,6 +104,8 @@ class LiveController:
             pass
         s = self._session()
         s["source"] = source
+        if self.p.get("model_name"):
+            s["model_name"] = self.p["model_name"]
         s.setdefault("cwd", self.host.cwd(self.p, self.ctx.env))
         outputs = []
         seen = self.store.read("notices.json") or {}
@@ -302,14 +305,49 @@ class LiveController:
         self._save(s)
         return merge_outputs(*outputs) if outputs else {}
 
+    def pre_invocation(self):
+        """Open one guard turn per user prompt and drain guidance deferred by PostToolUse.
+
+        Agy calls PreInvocation for each model request in one execution, so the user prompt's
+        stable digest, rather than invocationNum, identifies the turn.
+        """
+        s = self._session()
+        key = self.host.turn_key(self.p)
+        turn = s.get("turn") or {}
+        needs_turn = (self.cfg.loopguard != "off" and
+                      (not turn or turn.get("turn_key") != key))
+        out = self.user_prompt() if needs_turn else {}
+        s = self._session()
+        if self.p.get("model_name"):
+            s["model_name"] = self.p["model_name"]
+        pending = s.pop("agy_pending_context", [])
+        if isinstance(pending, str):
+            pending = [pending]
+        if pending:
+            out = merge_outputs(out, self.host.context("PreInvocation", "\n\n".join(
+                text for text in pending if text)))
+        self._save(s)
+        return out
+
     def stop(self):
-        if self.cfg.loopguard == "off" or self.p.get("stop_hook_active"):
+        if self.p.get("stop_hook_active"):
             return {}
         s = self._session()
-        summary = self._close_turn(s, stopped_normally=self.host.stopped_normally(self.p))
+        # Stop can fire while a background command is still running. Wait for the fully-idle
+        # notification before closing a turn or scheduling its eventual fold.
+        if self.host.name == "antigravity" and self.p.get("fully_idle") is not True:
+            self._save(s)
+            return {}
+        summary = (self._close_turn(s, stopped_normally=self.host.stopped_normally(self.p))
+                   if self.cfg.loopguard != "off" else None)
         if summary:
             self._log("turn", **summary)
         self._save(s)
+        if self.host.name == "antigravity" and s.get("transcript"):
+            # Stop is an execution boundary, not conversation deletion. Fold only after the
+            # transcript has remained quiet for the normal stale-session window; a resumed
+            # conversation updates its log and the worker waits again.
+            self.ctx.spawn(["fold", "--session", self.sid, "--wait-idle"], "fold.log")
         return {}
 
     # ---- PostToolUse ---------------------------------------------------------------------
@@ -325,7 +363,8 @@ class LiveController:
         from .judge import AsyncJudge, NoVerdict
         if envelope is None:
             return None
-        if sidecall.paused(self.host.name, self.ctx.root):
+        if (self.host.name == "antigravity" or
+                sidecall.paused(self.host.name, self.ctx.root)):
             return NoVerdict()
         return AsyncJudge(self.ctx, self.sid, thr.get("judge_confidence"))
 
@@ -347,6 +386,11 @@ class LiveController:
         tracker = loopguard.load_envelope(self.store, level=self.cfg.loopguard_aggr,
                                       overrides=self.cfg.loopguard_thresholds)
         envelope = tracker.envelope
+        # Agy cannot make the plugin's optional authenticated judge call. Until its own
+        # repository has enough resolved turns for a real envelope, permit the strict
+        # rule-only fallback to nudge an unmistakable failure loop after min_turns.
+        if self.host.name == "antigravity" and envelope is None:
+            envelope = 0.0
         thr = loopguard.thresholds(tracker, self.cfg.loopguard_thresholds)
         # The judge is woken only by a sign of trouble -- a repeated failure, or dense errors --
         # once a turn has run `min_turns` calls; never merely because the turn outran this
@@ -367,10 +411,13 @@ class LiveController:
                 s["nudges"] = int(s.get("nudges", 0)) + 1
                 self._log("nudge", reason=reason, tool_calls=g.cum_turns, envelope=envelope)
                 if not self.cfg.shadow:
-                    out = merge_outputs(
-                        self.host.context(event, body),
-                        self.host.notice(f"TokenEconomizer nudged this turn ({short}): the "
-                                         f"same failure kept recurring."))
+                    notice = (f"TokenEconomizer nudged this turn ({short}): the same failure "
+                              "kept recurring.")
+                    if self.host.name == "antigravity":
+                        s.setdefault("agy_pending_context", []).append(body + "\n\n" + notice)
+                    else:
+                        out = merge_outputs(self.host.context(event, body),
+                                            self.host.notice(notice))
             elif action == "abort" and not g.abort_delivered:
                 # Still stuck after the redirect. The plugin never stops a turn itself -- the
                 # agents' hooks cannot all do it, and the person decides -- so the last rung is
@@ -383,8 +430,11 @@ class LiveController:
                     headless = self.ctx.is_headless(self.host.transcript(self.p))
                     text = (f"TokenEconomizer: this turn still looks stuck after a redirect "
                             f"({short}, {g.cum_turns} tool calls). {self.host.stop_hint(headless)}")
-                    out = self.host.notice(text)
-                    if self.host.relays_notices:
+                    if self.host.name == "antigravity":
+                        s.setdefault("agy_pending_context", []).append(text)
+                    else:
+                        out = self.host.notice(text)
+                    if self.host.name != "antigravity" and self.host.relays_notices:
                         # Where the agent keeps hook messages out of the person's view, the
                         # model passes the notice on in its reply, which they do see.
                         out = merge_outputs(out, self.host.context(event, self.host.relay(text)))
