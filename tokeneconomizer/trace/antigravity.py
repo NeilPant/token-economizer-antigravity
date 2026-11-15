@@ -7,7 +7,8 @@ shared learning stages. Unknown or incomplete records are skipped rather than gu
 """
 import json
 import os
-from collections import Counter
+from collections import Counter, deque
+from tempfile import NamedTemporaryFile
 
 from .jsonl import records
 
@@ -60,24 +61,45 @@ def _result_text(record):
 def antigravity_to_claude(transcript_path, output_path):
     """Write a Claude-shaped JSONL trace from an Agy transcript; return records written.
 
-    Transcript tool calls are paired with subsequent GENERIC steps in trajectory order. Agy's
+    Transcript tool calls are paired with subsequent GENERIC steps within each prompt. Agy's
     hook payload remains the authoritative source for live failure status; this reader is for
     completed-session folding and intentionally does not infer success from missing output.
     """
     if not transcript_path or not os.path.isfile(transcript_path):
         return None
-    rows = list(records(transcript_path))
-    pending = []
-    out = []
-    for row in rows:
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    temporary_path = None
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        with NamedTemporaryFile(mode="w", encoding="utf-8", errors="backslashreplace",
+                                dir=output_dir, delete=False) as output:
+            temporary_path = output.name
+            count = 0
+            for row in _claude_steps(records(transcript_path)):
+                output.write(json.dumps(row, ensure_ascii=False) + "\n")
+                count += 1
+        os.replace(temporary_path, output_path)
+        temporary_path = None
+        return count
+    except OSError:
+        return None
+    finally:
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+
+
+def _claude_steps(rows):
+    pending = deque()
+    for row_number, row in enumerate(rows):
         kind = str(row.get("type") or "").upper()
-        is_model = (kind != "GENERIC" and
-                    (str(row.get("source") or "").upper() == "MODEL" or
-                     kind in ("MODEL", "PLANNER_RESPONSE")))
         if kind == "USER_INPUT" and row.get("source") == "USER_EXPLICIT":
-            out.append({"type": "user", "message": {"content": _result_text(row)}})
+            pending.clear()  # A new prompt can follow an interrupted tool call.
+            yield {"type": "user", "message": {"content": _result_text(row)}}
             continue
-        if is_model:
+        if _is_model_step(row, kind):
             calls = row.get("tool_calls")
             calls = calls if isinstance(calls, list) else []
             blocks = []
@@ -88,32 +110,29 @@ def antigravity_to_claude(transcript_path, output_path):
                 if not isinstance(call, dict):
                     continue
                 tool_name = call.get("name") or call.get("toolName")
-                tool_id = f"agy-step-{row.get('step_index', len(out))}-{index}"
+                tool_id = f"agy-row-{row_number}-{index}"
                 blocks.append({"type": "tool_use", "id": tool_id,
                                "name": _tool_name(tool_name),
                                "input": _tool_args(tool_name, call.get("args"))})
                 pending.append(tool_id)
             if blocks:
-                out.append({"type": "assistant", "message": {"content": blocks}})
+                yield {"type": "assistant", "message": {"content": blocks}}
             continue
         if kind == "GENERIC" and pending:
-            tool_id = pending.pop(0)
+            tool_id = pending.popleft()
             result = _result_text(row)
             failed = str(row.get("status") or "").upper() in ("ERROR", "FAILED")
             if row.get("error"):
                 failed = True
-            out.append({"type": "user", "message": {"content": [
+            yield {"type": "user", "message": {"content": [
                 {"type": "tool_result", "tool_use_id": tool_id, "content": result,
                  "is_error": failed}
-            ]}})
-    try:
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as fh:
-            for row in out:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    except OSError:
-        return None
-    return len(out)
+            ]}}
+
+
+def _is_model_step(row, kind):
+    return kind != "GENERIC" and (str(row.get("source") or "").upper() == "MODEL" or
+                                  kind in ("MODEL", "PLANNER_RESPONSE"))
 
 
 def antigravity_prompt_count(transcript_path):
@@ -125,10 +144,8 @@ def antigravity_prompt_count(transcript_path):
 def antigravity_session_usage(transcript_path):
     """Sum each step once, using the latest valid counter reported for each field."""
     by_step = {}
-    for line_number, row in enumerate(records(transcript_path)):
-        if ((str(row.get("source") or "").upper() != "MODEL" and
-             str(row.get("type") or "").upper() not in ("MODEL", "PLANNER_RESPONSE")) or
-                str(row.get("type") or "").upper() == "GENERIC"):
+    for row_number, row in enumerate(records(transcript_path)):
+        if not _is_model_step(row, str(row.get("type") or "").upper()):
             continue
         usage = {}
         for field, name in _TOKEN_FIELDS.items():
@@ -138,7 +155,7 @@ def antigravity_session_usage(transcript_path):
                     usage[name] = int(value)
         model = row.get("model") or row.get("modelName")
         step_index = row.get("step_index")
-        key = step_index if type(step_index) in (int, str) else (line_number,)
+        key = step_index if type(step_index) in (int, str) else (row_number,)
         if usage:
             step = by_step.setdefault(key, {})
             step.update(usage)

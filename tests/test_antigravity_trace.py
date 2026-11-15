@@ -2,8 +2,50 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from tokeneconomizer.trace.antigravity import antigravity_session_usage
+from tokeneconomizer.trace.antigravity import antigravity_session_usage, antigravity_to_claude
+
+
+class AntigravityConversionTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.transcript = Path(directory.name) / "input.jsonl"
+        self.output = Path(directory.name) / "output.jsonl"
+
+    def test_new_prompt_discards_unfinished_calls_and_keeps_tool_ids_unique(self):
+        rows = [
+            {"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "Read two files"},
+            {"type": "MODEL", "step_index": 1, "tool_calls": [{"name": "read_file"}, {"name": "read_file"}]},
+            {"type": "GENERIC", "content": "First result"},
+            {"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "Read a third file"},
+            {"type": "MODEL", "step_index": 1, "tool_calls": [{"name": "read_file"}]},
+            {"type": "GENERIC", "status": "FAILED", "error": "File not found"},
+        ]
+        self.transcript.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+        count = antigravity_to_claude(self.transcript, self.output)
+
+        self.assertEqual(count, 6)
+        steps = [json.loads(line)["message"]["content"] for line in self.output.read_text(encoding="utf-8").splitlines()]
+        first, interrupted = steps[1]
+        third = steps[4][0]
+        self.assertEqual(len({first["id"], interrupted["id"], third["id"]}), 3)
+        self.assertEqual(steps[2][0]["tool_use_id"], first["id"])
+        self.assertEqual(steps[5][0]["tool_use_id"], third["id"])
+        self.assertEqual(steps[5][0]["content"], "File not found")
+        self.assertTrue(steps[5][0]["is_error"])
+
+    def test_failed_replacement_leaves_existing_output_and_cleans_up(self):
+        self.transcript.write_text('{"type":"MODEL","content":"new"}\n', encoding="utf-8")
+        self.output.write_text("previous\n", encoding="utf-8")
+
+        with patch("tokeneconomizer.trace.antigravity.os.replace", side_effect=OSError("write failed")):
+            self.assertIsNone(antigravity_to_claude(self.transcript, self.output))
+
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "previous\n")
+        self.assertEqual(set(self.output.parent.iterdir()), {self.transcript, self.output})
 
 
 class AntigravityUsageTests(unittest.TestCase):
