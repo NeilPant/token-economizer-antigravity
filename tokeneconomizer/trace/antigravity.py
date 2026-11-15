@@ -7,8 +7,17 @@ shared learning stages. Unknown or incomplete records are skipped rather than gu
 """
 import json
 import os
+from collections import Counter
 
 from .jsonl import records
+
+
+_TOKEN_FIELDS = {
+    "input_tokens": "input_tokens",
+    "cache_read_tokens": "cache_read_input_tokens",
+    "cache_write_tokens": "cache_creation_input_tokens",
+    "output_tokens": "output_tokens",
+}
 
 
 def _tool_name(name):
@@ -114,36 +123,32 @@ def antigravity_prompt_count(transcript_path):
 
 
 def antigravity_session_usage(transcript_path):
-    """Sum model token usage once per trajectory step; absent fields remain unavailable."""
+    """Sum each step once, using the latest valid counter reported for each field."""
     by_step = {}
-    models = {}
-    for row in records(transcript_path):
+    for line_number, row in enumerate(records(transcript_path)):
         if ((str(row.get("source") or "").upper() != "MODEL" and
              str(row.get("type") or "").upper() not in ("MODEL", "PLANNER_RESPONSE")) or
                 str(row.get("type") or "").upper() == "GENERIC"):
             continue
-        if not any(isinstance(row.get(k), (int, float)) for k in (
-                "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")):
-            continue
-        key = row.get("step_index")
-        if key is None:
-            key = f"row-{len(by_step)}"
-        usage = {
-            "input_tokens": int(row.get("input_tokens") or 0),
-            "cache_read_input_tokens": int(row.get("cache_read_tokens") or 0),
-            "cache_creation_input_tokens": int(row.get("cache_write_tokens") or 0),
-            "output_tokens": int(row.get("output_tokens") or 0),
-        }
-        by_step[key] = usage
+        usage = {}
+        for field, name in _TOKEN_FIELDS.items():
+            value = row.get(field)
+            if type(value) is int or (isinstance(value, float) and value.is_integer()):
+                if value >= 0:
+                    usage[name] = int(value)
         model = row.get("model") or row.get("modelName")
-        if model:
-            models[str(model)] = models.get(str(model), 0) + 1
+        step_index = row.get("step_index")
+        key = step_index if type(step_index) in (int, str) else (line_number,)
+        if usage:
+            step = by_step.setdefault(key, {})
+            step.update(usage)
+            if isinstance(model, str) and model:
+                step["model"] = model
     if not by_step:
         return {}
-    out = {name: sum(row[name] for row in by_step.values()) for name in (
-        "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
-        "output_tokens")}
+    models = Counter(step["model"] for step in by_step.values() if "model" in step)
+    out = {name: sum(step.get(name, 0) for step in by_step.values()) for name in _TOKEN_FIELDS.values()}
     out["requests"] = len(by_step)
-    out["model"] = max(models, key=models.get) if models else None
+    out["model"] = models.most_common(1)[0][0] if models else None
     out["files"] = int(os.path.exists(transcript_path))
     return out
